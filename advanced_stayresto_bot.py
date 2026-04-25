@@ -12,14 +12,17 @@ Features:
 - Admin broadcast
 - Antispam rate limiting
 - Multilingual support
+Render‑compatible with health‑check server
 """
 
 import os
 import re
 import time
 import logging
+import threading
 from datetime import datetime, timedelta, date
 from typing import Dict, List, Optional
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from dotenv import load_dotenv
 
@@ -52,7 +55,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(","))) if os.getenv("ADMIN_IDS") else []
 LOG_GROUP_ID = int(os.getenv("LOG_GROUP_ID", "0"))
-DATABASE_URL = os.getenv("DATABASE_URL")  # PostgreSQL connection string
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN is missing.")
@@ -65,24 +68,32 @@ logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # ---------------------------
+# Health‑check HTTP server (for Render Web Service)
+# ---------------------------
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def start_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    logger.info(f"💚 Health server listening on port {port}")
+    server.serve_forever()
+
+# ---------------------------
 # PostgreSQL connection pool (thread‑safe)
 # ---------------------------
-# Use a small pool size, adequate for a Telegram bot.
 db_pool = pool.ThreadedConnectionPool(2, 10, DATABASE_URL)
 
 def get_db_connection():
-    """Get a connection from the pool."""
     return db_pool.getconn()
 
 def return_db_connection(conn):
-    """Return connection to the pool."""
     db_pool.putconn(conn)
 
 def db_execute(query, params=None, fetch=False, commit=True):
-    """
-    Execute a query, optionally fetch results.
-    Automatically gets and returns connection from pool.
-    """
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
@@ -139,7 +150,7 @@ def init_db():
 init_db()
 
 # ---------------------------
-# Multilingual support (unchanged)
+# Multilingual support
 # ---------------------------
 LANGUAGES = {
     "en": {
@@ -236,7 +247,7 @@ def translate(key: str, user_id: Optional[int] = None, **kwargs) -> str:
     return text
 
 # ---------------------------
-# Database helpers (PostgreSQL versions)
+# Database helpers (PostgreSQL)
 # ---------------------------
 def save_user(user_id, username, first_name, language="en"):
     db_execute(
@@ -265,12 +276,12 @@ def save_booking(user_id, check_in, check_out, guests, contact):
     )
 
 # ---------------------------
-# Antispam (unchanged)
+# Antispam
 # ---------------------------
 spam_tracker: Dict[tuple, List[float]] = {}
 SPAM_THRESHOLD = 5
 SPAM_WINDOW = 10
-MUTE_DURATION = 300  # 5 minutes
+MUTE_DURATION = 300
 
 async def check_spam(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     if update.effective_chat.type not in [ChatType.GROUP, ChatType.SUPERGROUP]:
@@ -308,13 +319,13 @@ async def check_spam(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool
     return False
 
 # ---------------------------
-# AI rate limiter (unchanged)
+# AI rate limiter
 # ---------------------------
 ai_cooldowns: Dict[int, float] = {}
-AI_COOLDOWN = 30  # seconds between AI calls per user
+AI_COOLDOWN = 30
 
 # ---------------------------
-# AI chat (unchanged)
+# AI chat
 # ---------------------------
 async def ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not AI_ENABLED:
@@ -351,7 +362,7 @@ async def ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Sorry, AI temporarily unavailable.")
 
 # ---------------------------
-# Booking conversation (unchanged)
+# Booking conversation
 # ---------------------------
 CHECK_IN, CHECK_OUT, GUESTS, CONTACT = range(4)
 
@@ -493,9 +504,7 @@ async def set_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     display_name = LANGUAGE_DISPLAY.get(lang, lang)
     await update.message.reply_text(f"✅ Language set to {display_name}.")
 
-# ---------- NEW: Admin Bookings Viewer ----------
 async def view_bookings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show the last 20 bookings to admins only."""
     if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("⛔ Unauthorized. Only admins can view bookings.")
         return
@@ -607,9 +616,12 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Update {update} caused error: {context.error}", exc_info=context.error)
 
 # ---------------------------
-# Main application
+# Main application (with health server)
 # ---------------------------
 def main():
+    # Start the health‑check server in a background thread BEFORE polling
+    threading.Thread(target=start_health_server, daemon=True).start()
+
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -618,7 +630,7 @@ def main():
     app.add_handler(CommandHandler("booking", booking_command))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("language", set_language))
-    app.add_handler(CommandHandler("viewbookings", view_bookings))  # NEW
+    app.add_handler(CommandHandler("viewbookings", view_bookings))
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("book", book_start)],
@@ -662,6 +674,5 @@ if __name__ == "__main__":
     try:
         main()
     finally:
-        # Close the pool when the script exits
         if db_pool:
             db_pool.closeall()
