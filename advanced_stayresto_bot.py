@@ -170,7 +170,8 @@ LANGUAGES = {
             "/book – Make a booking\n"
             "/cancel – Cancel current booking\n"
             "/language <code> – Change language (e.g. /language en or /language hi)\n"
-            "/broadcast – Admin broadcast"
+            "/broadcast – Admin broadcast\n"
+            "/viewbookings – View all bookings (Admin only)"
         ),
     },
     "hi": {
@@ -201,7 +202,8 @@ LANGUAGES = {
             "/book – बुकिंग करें\n"
             "/cancel – वर्तमान बुकिंग रद्द करें\n"
             "/language <code> – भाषा बदलें (उदा. /language en या /language hi)\n"
-            "/broadcast – व्यवस्थापक प्रसारण"
+            "/broadcast – व्यवस्थापक प्रसारण\n"
+            "/viewbookings – सभी बुकिंग देखें (केवल एडमिन)"
         ),
     },
 }
@@ -435,7 +437,7 @@ async def book_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ---------------------------
-# Command handlers (unchanged except DB helpers)
+# Command handlers
 # ---------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -490,6 +492,35 @@ async def set_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_user_language(update.effective_user.id, lang)
     display_name = LANGUAGE_DISPLAY.get(lang, lang)
     await update.message.reply_text(f"✅ Language set to {display_name}.")
+
+# ---------- NEW: Admin Bookings Viewer ----------
+async def view_bookings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show the last 20 bookings to admins only."""
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Unauthorized. Only admins can view bookings.")
+        return
+
+    rows = db_execute(
+        "SELECT id, user_id, check_in, check_out, guests, contact, created_at "
+        "FROM bookings ORDER BY created_at DESC LIMIT 20",
+        fetch=True,
+    )
+    if not rows:
+        await update.message.reply_text("📭 No bookings found.")
+        return
+
+    msg = "📋 *Last 20 bookings:*\n\n"
+    for r in rows:
+        msg += (
+            f"*ID:* {r[0]}\n"
+            f"*User:* {r[1]}\n"
+            f"*Check‑in:* {r[2]}  →  *Check‑out:* {r[3]}\n"
+            f"*Guests:* {r[4]}\n"
+            f"*Contact:* {r[5]}\n"
+            f"*Created:* {r[6].strftime('%Y-%m-%d %H:%M') if r[6] else 'N/A'}\n"
+            f"──────────────────\n"
+        )
+    await update.message.reply_markdown(msg)
 
 def welcome_keyboard():
     kb = [
@@ -587,6 +618,7 @@ def main():
     app.add_handler(CommandHandler("booking", booking_command))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("language", set_language))
+    app.add_handler(CommandHandler("viewbookings", view_bookings))  # NEW
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("book", book_start)],
@@ -633,4 +665,3 @@ if __name__ == "__main__":
         # Close the pool when the script exits
         if db_pool:
             db_pool.closeall()
-  
